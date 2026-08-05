@@ -28,7 +28,7 @@ import (
 // CollectParams is a collection of common parameters passed to the CLI
 // for the 'collect' subcommand.
 type CollectParams struct {
-	Concurrency  int                 // set the of concurrent jobs with the 'concurrency' flag
+Concurrency  int                 // set the of concurrent jobs with the 'concurrency' flag
 	Timeout      int                 // set the timeout with the 'timeout' flag
 	Insecure     bool                // set whether to ignore TLS verification
 	OutputPath   string              // set the path to save output with 'output' flag
@@ -37,6 +37,8 @@ type CollectParams struct {
 	InputFormat  format.DataFormat   // set the input format
 	BMCIDMap     string              // Set the path to the BMC ID mapping YAML or JSON data or file name (if any)
 	SecretStore  secrets.SecretStore // set BMC credentials
+	Include      []string            // Additional inventory detail to collect: memory,cpu,gpu,all
+
 }
 
 // This is the main function used to collect information from the BMC nodes via Redfish.
@@ -109,6 +111,7 @@ func CollectInventory(assets *[]RemoteAsset, params *CollectParams) ([]map[strin
 						CredentialStore: params.SecretStore,
 						Insecure:        params.Insecure,
 						UseDefault:      true,
+						Include:         params.Include,
 					}
 				)
 
