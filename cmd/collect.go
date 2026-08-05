@@ -24,6 +24,8 @@ var (
 	collectDataArgs     []string
 )
 
+var collectInclude []string
+
 // The `collect` command fetches data from a collection of BMC nodes.
 // This command should be ran after the `scan` to find available hosts
 // on a subnet.
@@ -191,6 +193,7 @@ var CollectCmd = &cobra.Command{
 
 		// set the collect parameters from CLI params
 		params := &magellan.CollectParams{
+
 			Timeout:      timeout,
 			Concurrency:  concurrency,
 			OutputPath:   outputPath,
@@ -200,6 +203,8 @@ var CollectCmd = &cobra.Command{
 			InputFormat:  collectInputFormat,
 			SecretStore:  store,
 			BMCIDMap:     idMap,
+			Include:      collectInclude,
+
 		}
 
 		// show all of the 'collect' parameters being set from CLI if verbose
@@ -234,7 +239,9 @@ func init() {
 	CollectCmd.Flags().VarP(&collectInputFormat, "input-format", "f", "Set the default input data format (json|yaml)")
 	CollectCmd.Flags().VarP(&collectOutputFormat, "output-format", "F", "Set the default output data format (json|yaml; can be overridden by file extensions)")
 	CollectCmd.Flags().StringVarP(&idMap, "bmc-id-map", "m", "", "Set the BMC ID mapping from raw json data or use @<path> to specify a file path (json or yaml input)")
-	CollectCmd.Flags().StringArrayVarP(&collectDataArgs, "data", "d", []string{}, "Set the data as input for collect (prepend @ for files)")
+
+CollectCmd.Flags().StringArrayVarP(&collectDataArgs, "data", "d", []string{}, "Set the data as input for collect (prepend @ for files)")
+	CollectCmd.Flags().StringSliceVar(&collectInclude, "include", []string{}, "Include additional inventory detail: memory,cpu,gpu (comma-separated, or 'all')")
 
 	// set mutually exclusive flags
 	CollectCmd.MarkFlagsMutuallyExclusive("output-file", "output-dir")
@@ -249,6 +256,7 @@ func init() {
 	checkBindFlagError(viper.BindPFlag("collect.output-dir", CollectCmd.Flags().Lookup("output-dir")))
 	// checkBindFlagError(viper.BindPFlag("collect.force-update", CollectCmd.Flags().Lookup("force-update")))
 	// checkBindFlagError(viper.BindPFlag("collect.cacert", CollectCmd.Flags().Lookup("cacert")))
+	checkBindFlagError(viper.BindPFlag("collect.include", CollectCmd.Flags().Lookup("include")))
 	checkBindFlagError(viper.BindPFlags(CollectCmd.Flags()))
 
 	rootCmd.AddCommand(CollectCmd)
