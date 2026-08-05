@@ -17,6 +17,7 @@ type CrawlerConfig struct {
 	Insecure        bool   // Whether to ignore SSL errors
 	CredentialStore secrets.SecretStore
 	UseDefault      bool
+	Include         []string // Additional detail to include: "memory", "cpu", "gpu", or "all"
 }
 
 func (cc *CrawlerConfig) GetUserPass() (bmc.BMCCredentials, error) {
@@ -46,6 +47,36 @@ type NetworkInterface struct {
 	Name        string         `json:"name,omitempty"`        // Name of the interface
 	Description string         `json:"description,omitempty"` // Description of the interface
 	Adapter     NetworkAdapter `json:"adapter,omitempty"`     // Adapter of the interface
+}
+
+type MemoryDetail struct {
+	URI          string `json:"uri,omitempty"`
+	Name         string `json:"name,omitempty"`
+	CapacityMiB  int    `json:"capacity_mib,omitempty"`
+	Type         string `json:"type,omitempty"`
+	Manufacturer string `json:"manufacturer,omitempty"`
+	SpeedMHz     int    `json:"speed_mhz,omitempty"`
+	Status       string `json:"status,omitempty"`
+}
+
+type ProcessorDetail struct {
+	URI            string `json:"uri,omitempty"`
+	Model          string `json:"model,omitempty"`
+	ProcessorType  string `json:"processor_type,omitempty"`
+	TotalCores     int    `json:"total_cores,omitempty"`
+	TotalThreads   int    `json:"total_threads,omitempty"`
+	MaxSpeedMHz    float32 `json:"max_speed_mhz,omitempty"`
+	InstructionSet string `json:"instruction_set,omitempty"`
+	Status         string `json:"status,omitempty"`
+}
+
+type PCIeDeviceDetail struct {
+	URI          string `json:"uri,omitempty"`
+	Name         string `json:"name,omitempty"`
+	Manufacturer string `json:"manufacturer,omitempty"`
+	Model        string `json:"model,omitempty"`
+	Description  string `json:"description,omitempty"`
+	Status       string `json:"status,omitempty"`
 }
 
 type Manager struct {
@@ -110,6 +141,9 @@ type InventoryDetail struct {
 	Chassis_Model        string              `json:"chassis_model,omitempty"`        // Model of the Chassis
 	Links                Links               `json:"links,omitempty"`                // Links to specific resources
 	NodeID               string              `json:"node_id,omitempty"`              // Node ID within the BMC, e.g. /redfish/v1/Systems/<ID>
+	Memory               []MemoryDetail      `json:"memory,omitempty"`               // Per-DIMM memory detail (opt-in via --include=memory,all)
+	Processors           []ProcessorDetail   `json:"processors,omitempty"`           // Per-CPU detail (opt-in via --include=cpu,all)
+	PCIeDevices          []PCIeDeviceDetail  `json:"pcie_devices,omitempty"`         // PCIe devices incl. GPUs (opt-in via --include=gpu,all)
 }
 
 // GetBMCClient connects to a BMC (Baseboard Management Controller) using the provided configuration,
@@ -190,7 +224,7 @@ func CrawlBMCForSystems(config CrawlerConfig) ([]InventoryDetail, error) {
 			}
 
 			// Walk the systems found under Chassis with reference
-			newSystems, err := walkSystems(rf_chassis_systems, chassis, config.URI)
+			newSystems, err := walkSystems(rf_chassis_systems, chassis, config.URI, config.Include)
 			if err != nil {
 				log.Error().
 					Err(err).
@@ -212,7 +246,7 @@ func CrawlBMCForSystems(config CrawlerConfig) ([]InventoryDetail, error) {
 	}
 	log.Debug().Msgf("found %d systems in ServiceRoot", len(rf_root_systems))
 	rf_systems = append(rf_systems, rf_root_systems...)
-	newSystems, err := walkSystems(rf_systems, nil, config.URI)
+	newSystems, err := walkSystems(rf_systems, nil, config.URI, config.Include)
 	if err != nil {
 		return extractPtrMapValues(systems), fmt.Errorf("failed to get systems: %v", err)
 	}
@@ -281,7 +315,7 @@ func CrawlBMCForManagers(config CrawlerConfig) ([]Manager, error) {
 //  6. Processes trusted modules for each computer system, adding them to the TrustedModules field of the InventoryDetail object.
 //  7. Appends the populated InventoryDetail object to the systems slice.
 //  8. Returns the systems slice and any error encountered during processing.
-func walkSystems(rf_systems []*redfish.ComputerSystem, rf_chassis *redfish.Chassis, baseURI string) ([]InventoryDetail, error) {
+func walkSystems(rf_systems []*redfish.ComputerSystem, rf_chassis *redfish.Chassis, baseURI string, include []string) ([]InventoryDetail, error) {
 	systems := []InventoryDetail{}
 	for _, rf_computersystem := range rf_systems {
 		var (
@@ -439,9 +473,106 @@ func walkSystems(rf_systems []*redfish.ComputerSystem, rf_chassis *redfish.Chass
 			system.TrustedModules = append(system.TrustedModules, fmt.Sprintf("%s %s", rf_trustedmodule.InterfaceType, rf_trustedmodule.FirmwareVersion))
 		}
 
+		// optionally collect additional inventory detail based on --include
+		if shouldInclude(include, "memory") {
+			mem, err := walkMemory(rf_computersystem, baseURI)
+			if err != nil {
+				log.Warn().Err(err).Str("id", rf_computersystem.ID).Msg("failed to get memory detail")
+			} else {
+				system.Memory = mem
+			}
+		}
+		if shouldInclude(include, "cpu") {
+			procs, err := walkProcessors(rf_computersystem, baseURI)
+			if err != nil {
+				log.Warn().Err(err).Str("id", rf_computersystem.ID).Msg("failed to get processor detail")
+			} else {
+				system.Processors = procs
+			}
+		}
+		if shouldInclude(include, "gpu") && rf_chassis != nil {
+			pcie, err := walkPCIeDevices(rf_chassis, baseURI)
+			if err != nil {
+				log.Warn().Err(err).Str("id", rf_computersystem.ID).Msg("failed to get PCIe devices")
+			} else {
+				system.PCIeDevices = pcie
+			}
+		}
+
 		systems = append(systems, system)
 	}
 	return systems, nil
+}
+
+func walkMemory(rf_computersystem *redfish.ComputerSystem, baseURI string) ([]MemoryDetail, error) {
+	var details []MemoryDetail
+	rf_memory, err := rf_computersystem.Memory()
+	if err != nil {
+		return details, err
+	}
+	for _, m := range rf_memory {
+		// skip absent/unpopulated DIMM slots - zero capacity means no module installed
+		if m.CapacityMiB == 0 {
+			continue
+		}
+		details = append(details, MemoryDetail{
+			URI:          baseURI + m.ODataID,
+			Name:         m.Name,
+			CapacityMiB:  m.CapacityMiB,
+			Type:         string(m.MemoryDeviceType),
+			Manufacturer: m.Manufacturer,
+			SpeedMHz:     m.OperatingSpeedMhz,
+			Status:       string(m.Status.State),
+		})
+	}
+	return details, nil
+}
+
+func walkProcessors(rf_computersystem *redfish.ComputerSystem, baseURI string) ([]ProcessorDetail, error) {
+	var details []ProcessorDetail
+	rf_processors, err := rf_computersystem.Processors()
+	if err != nil {
+		return details, err
+	}
+	for _, p := range rf_processors {
+		details = append(details, ProcessorDetail{
+			URI:            baseURI + p.ODataID,
+			Model:          p.Model,
+			ProcessorType:  string(p.ProcessorType),
+			TotalCores:     p.TotalCores,
+			TotalThreads:   p.TotalThreads,
+			MaxSpeedMHz:    p.MaxSpeedMHz,
+			InstructionSet: string(p.InstructionSet),
+			Status:         string(p.Status.State),
+		})
+	}
+	return details, nil
+}
+
+// walkPCIeDevices pulls PCIe devices (including GPUs) from a Chassis.
+// PCIe devices are rooted under Chassis in Redfish, not ComputerSystem,
+// so this requires a chassis reference - it will return nothing for
+// systems found only under the ServiceRoot with no associated chassis.
+func walkPCIeDevices(rf_chassis *redfish.Chassis, baseURI string) ([]PCIeDeviceDetail, error) {
+	var details []PCIeDeviceDetail
+	if rf_chassis == nil {
+		return details, nil
+	}
+	rf_devices, err := rf_chassis.PCIeDevices()
+	if err != nil {
+		return details, err
+	}
+	for _, d := range rf_devices {
+		details = append(details, PCIeDeviceDetail{
+			URI:          baseURI + d.ODataID,
+			Name:         d.Name,
+			Manufacturer: d.Manufacturer,
+			Model:        d.Model,
+			Description:  d.Description,
+			Status:       string(d.Status.State),
+		})
+	}
+	return details, nil
 }
 
 // walkManagers processes a list of Redfish managers and extracts relevant information
@@ -535,4 +666,15 @@ func merge(systems map[string]*InventoryDetail, newSystems []InventoryDetail) ma
 		systems[system.URI] = &system
 	}
 	return systems
+}
+
+// shouldInclude checks whether a given category (e.g. "memory", "cpu", "gpu")
+// was requested via --include, or whether "all" was passed.
+func shouldInclude(include []string, name string) bool {
+	for _, v := range include {
+		if strings.EqualFold(v, "all") || strings.EqualFold(v, name) {
+			return true
+		}
+	}
+	return false
 }
